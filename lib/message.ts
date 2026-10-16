@@ -15,10 +15,6 @@ export const MESSAGE_VARIANTS: { id: MessageVariant; label: string }[] = [
   { id: "social", label: "Foco: só rede social" },
 ];
 
-function firstWord(name: string): string {
-  return name.trim().split(/\s+/)[0];
-}
-
 export function generateMessage(
   ctx: MessageContext,
   variant: MessageVariant = "direto",

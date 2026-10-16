@@ -3,7 +3,13 @@ import { GeocodeResult } from "./types";
 
 const USER_AGENT = "LeadSemSite/1.0 (ferramenta pessoal de prospecção)";
 const NOMINATIM = "https://nominatim.openstreetmap.org/search";
-const OVERPASS = "https://overpass-api.de/api/interpreter";
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
+const OVERPASS_ATTEMPTS = 2;
+const OVERPASS_BACKOFF_MS = 1500;
+const RETRYABLE_STATUS = [429, 502, 503, 504];
 
 export async function geocodeCity(city: string): Promise<GeocodeResult> {
   const url = `${NOMINATIM}?q=${encodeURIComponent(city)}&format=jsonv2&addressdetails=1&limit=1&countrycodes=br`;
@@ -64,22 +70,47 @@ export async function queryBusinesses(
     parts.push(`way${f}(${areaFilter});`);
   }
   const body = `[out:json][timeout:90];\n(\n  ${parts.join("\n  ")}\n);\nout center tags ${limit};`;
-  const res = await fetch(OVERPASS, {
-    method: "POST",
-    headers: {
-      "User-Agent": USER_AGENT,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: "data=" + encodeURIComponent(body),
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    throw new Error(
-      `Consulta ao OpenStreetMap falhou (${res.status}). Tente novamente em instantes.`,
-    );
+  const bodyEncoded = "data=" + encodeURIComponent(body);
+
+  let lastStatus: number | undefined;
+  for (let attempt = 0; attempt < OVERPASS_ATTEMPTS; attempt++) {
+    for (const endpoint of OVERPASS_ENDPOINTS) {
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "User-Agent": USER_AGENT,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: bodyEncoded,
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { elements?: RawElement[] };
+          return data.elements ?? [];
+        }
+        lastStatus = res.status;
+        if (!RETRYABLE_STATUS.includes(lastStatus)) {
+          throw new Error(
+            `Consulta ao OpenStreetMap falhou (${lastStatus}). Tente novamente em instantes.`,
+          );
+        }
+      } catch (err) {
+        const errorObj = err as { message?: string };
+        const message = errorObj?.message;
+        if (message && message.startsWith("Consulta ao OpenStreetMap falhou (")) {
+          throw err;
+        }
+        // Network/fetch error: continue to next endpoint/attempt
+      }
+    }
+    if (attempt < OVERPASS_ATTEMPTS - 1) {
+      await new Promise((r) => setTimeout(r, OVERPASS_BACKOFF_MS * (attempt + 1)));
+    }
   }
-  const data = (await res.json()) as { elements?: RawElement[] };
-  return data.elements ?? [];
+  throw new Error(
+    `Consulta ao OpenStreetMap falhou (${lastStatus ?? 503}). Tente novamente em instantes.`,
+  );
 }
 
 export function buildAddress(tags: Record<string, string>): string | undefined {
